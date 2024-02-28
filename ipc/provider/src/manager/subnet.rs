@@ -17,6 +17,7 @@ use ipc_api::subnet_id::SubnetID;
 use ipc_api::validator::Validator;
 
 use crate::lotus::message::ipc::SubnetInfo;
+use crate::manager::TransactionDetail;
 
 /// Trait to interact with a subnet and handle its lifecycle.
 #[async_trait]
@@ -221,7 +222,7 @@ pub trait BottomUpCheckpointRelayer: Send + Sync {
         checkpoint: BottomUpCheckpoint,
         signatures: Vec<Signature>,
         signatories: Vec<Address>,
-    ) -> Result<ChainEpoch>;
+    ) -> Result<TransactionDetail<ChainEpoch>>;
     /// The last confirmed/submitted checkpoint height.
     async fn last_bottom_up_checkpoint_height(&self, subnet_id: &SubnetID) -> Result<ChainEpoch>;
     /// Get the checkpoint period, i.e the number of blocks to submit bottom up checkpoints.

@@ -27,7 +27,7 @@ use crate::manager::subnet::{
     BottomUpCheckpointRelayer, GetBlockHashResult, SubnetGenesisInfo, TopDownFinalityQuery,
     TopDownQueryPayload,
 };
-use crate::manager::{EthManager, SubnetManager};
+use crate::manager::{EthManager, SubnetManager, TransactionDetail};
 use anyhow::{anyhow, Context, Result};
 use async_trait::async_trait;
 use ethers::abi::Tokenizable;
@@ -333,7 +333,7 @@ impl SubnetManager for EthSubnetManager {
 
         let pending_tx = txn.send().await?;
         let receipt = pending_tx.retries(TRANSACTION_RECEIPT_RETRIES).await?;
-        block_number_from_receipt(receipt)
+        block_number_from_maybe_receipt(receipt)
     }
 
     async fn pre_fund(&self, subnet: SubnetID, from: Address, balance: TokenAmount) -> Result<()> {
@@ -544,7 +544,7 @@ impl SubnetManager for EthSubnetManager {
 
         let pending_tx = txn.send().await?;
         let receipt = pending_tx.retries(TRANSACTION_RECEIPT_RETRIES).await?;
-        block_number_from_receipt(receipt)
+        block_number_from_maybe_receipt(receipt)
     }
 
     async fn fund_with_token(
@@ -574,7 +574,7 @@ impl SubnetManager for EthSubnetManager {
 
         let pending_tx = txn.send().await?;
         let receipt = pending_tx.retries(TRANSACTION_RECEIPT_RETRIES).await?;
-        block_number_from_receipt(receipt)
+        block_number_from_maybe_receipt(receipt)
     }
 
     async fn release(
@@ -604,7 +604,7 @@ impl SubnetManager for EthSubnetManager {
 
         let pending_tx = txn.send().await?;
         let receipt = pending_tx.retries(TRANSACTION_RECEIPT_RETRIES).await?;
-        block_number_from_receipt(receipt)
+        block_number_from_maybe_receipt(receipt)
     }
 
     /// Propagate the postbox message key. The key should be `bytes32`.
@@ -969,7 +969,7 @@ impl BottomUpCheckpointRelayer for EthSubnetManager {
         checkpoint: BottomUpCheckpoint,
         signatures: Vec<Signature>,
         signatories: Vec<Address>,
-    ) -> anyhow::Result<ChainEpoch> {
+    ) -> Result<TransactionDetail<ChainEpoch>> {
         let address = contract_address_from_subnet(&checkpoint.subnet_id)?;
         log::debug!(
             "submit bottom up checkpoint: {checkpoint:?} in evm subnet contract: {address:}"
@@ -993,11 +993,29 @@ impl BottomUpCheckpointRelayer for EthSubnetManager {
             signer.clone(),
         );
         let call = contract.submit_checkpoint(checkpoint, signatories, signatures);
-        let call = call_with_premium_estimation(signer, call).await?;
+
+        let (max_priority_fee_per_gas, _) = premium_estimation(signer).await?;
+        let call = call.gas_price(max_priority_fee_per_gas);
+
+        let estimated_gas = call.estimate_gas().await?;
 
         let pending_tx = call.send().await?;
-        let receipt = pending_tx.retries(TRANSACTION_RECEIPT_RETRIES).await?;
-        block_number_from_receipt(receipt)
+        let receipt = pending_tx
+            .retries(TRANSACTION_RECEIPT_RETRIES)
+            .await?
+            .ok_or_else(|| anyhow!("txn successful but receipt not present"))?;
+
+        // safe to unwrap as eth_to_fil_amount call
+        let detail = TransactionDetail {
+            estimated_gas: eth_to_fil_amount(&estimated_gas).unwrap(),
+            actual_gas: eth_to_fil_amount(&receipt.cumulative_gas_used).unwrap(),
+            gas_price: receipt
+                .effective_gas_price
+                .map(|f| eth_to_fil_amount(&f).unwrap()),
+            gas_premium: Some(eth_to_fil_amount(&max_priority_fee_per_gas).unwrap()),
+            payload: block_number_from_receipt(receipt)?,
+        };
+        Ok(detail)
     }
 
     async fn last_bottom_up_checkpoint_height(
@@ -1205,8 +1223,8 @@ fn estimate_priority_fee(rewards: Vec<Vec<U256>>) -> U256 {
     values[values.len() / 2]
 }
 
-/// Get the block number from the transaction receipt
-fn block_number_from_receipt(
+/// Get the block number from the optional transaction receipt
+fn block_number_from_maybe_receipt(
     receipt: Option<ethers::types::TransactionReceipt>,
 ) -> Result<ChainEpoch> {
     match receipt {
@@ -1220,6 +1238,14 @@ fn block_number_from_receipt(
             "txn sent to network, but receipt cannot be obtained, please check scanner"
         )),
     }
+}
+
+/// Get the block number from the transaction receipt
+fn block_number_from_receipt(receipt: ethers::types::TransactionReceipt) -> Result<ChainEpoch> {
+    let block_number = receipt
+        .block_number
+        .ok_or_else(|| anyhow!("cannot get block number"))?;
+    Ok(block_number.as_u64() as ChainEpoch)
 }
 
 fn is_valid_bootstrap_addr(input: &str) -> Option<(String, IpAddr, u16)> {

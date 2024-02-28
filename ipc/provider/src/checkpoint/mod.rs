@@ -2,12 +2,21 @@
 // SPDX-License-Identifier: MIT
 //! Bottom up checkpoint manager
 
+pub mod monitor;
+
+use crate::checkpoint::monitor::{
+    ensure_monitoring_setup, BU_CHECKPOINT_ACTUAL_GAS, BU_CHECKPOINT_GAS_ESTIMATED,
+    BU_CHECKPOINT_GAS_PREMIUM, BU_CHECKPOINT_GAS_PRICE, LATEST_COMMITTED_BU_HEIGHT,
+    NUM_BU_CHECKPOINT_FAILED, NUM_BU_CHECKPOINT_SUBMITTED, NUM_BU_CHECKPOINT_SUCCEEDED,
+};
 use crate::config::Subnet;
 use crate::manager::{BottomUpCheckpointRelayer, EthSubnetManager};
 use anyhow::{anyhow, Result};
 use fvm_shared::address::Address;
 use fvm_shared::clock::ChainEpoch;
+use fvm_shared::econ::TokenAmount;
 use ipc_wallet::{EthKeyAddress, PersistentKeyStore};
+use num_traits::ToPrimitive;
 use std::cmp::max;
 use std::fmt::{Display, Formatter};
 use std::sync::{Arc, RwLock};
@@ -102,8 +111,10 @@ impl<T: BottomUpCheckpointRelayer + Send + Sync + 'static> BottomUpCheckpointMan
     }
 
     /// Run the bottom up checkpoint submission daemon in the foreground
-    pub async fn run(self, submitter: Address, submission_interval: Duration) {
+    pub async fn run(self, submitter: Address, submission_interval: Duration) -> Result<()> {
         log::info!("launching {self} for {submitter}");
+
+        ensure_monitoring_setup()?;
 
         loop {
             self.submit_checkpoint(&submitter).await;
@@ -176,7 +187,9 @@ impl<T: BottomUpCheckpointRelayer + Send + Sync + 'static> BottomUpCheckpointMan
                     .await?;
                 log::debug!("bottom up bundle: {bundle:?}");
 
-                let epoch = self
+                NUM_BU_CHECKPOINT_SUBMITTED.inc();
+
+                let txn_detail = self
                     .parent_handler
                     .submit_checkpoint(
                         submitter,
@@ -185,16 +198,49 @@ impl<T: BottomUpCheckpointRelayer + Send + Sync + 'static> BottomUpCheckpointMan
                         bundle.signatories,
                     )
                     .await
-                    .map_err(|e| anyhow!("cannot submit bottom up checkpoint due to: {e:}"))?;
+                    .map_err(|e| {
+                        NUM_BU_CHECKPOINT_FAILED.inc();
+                        anyhow!("cannot submit bottom up checkpoint due to: {e:}")
+                    })?;
+
+                process_if_f64(&txn_detail.estimated_gas, |a| {
+                    BU_CHECKPOINT_GAS_ESTIMATED.observe(a)
+                });
+                process_if_f64(&txn_detail.actual_gas, |a| {
+                    BU_CHECKPOINT_ACTUAL_GAS.observe(a)
+                });
+                process_some_if_f64(&txn_detail.gas_premium, |a| {
+                    BU_CHECKPOINT_GAS_PREMIUM.observe(a)
+                });
+                process_some_if_f64(&txn_detail.gas_price, |a| {
+                    BU_CHECKPOINT_GAS_PRICE.observe(a)
+                });
+
+                LATEST_COMMITTED_BU_HEIGHT.set(event.height);
+                NUM_BU_CHECKPOINT_SUCCEEDED.inc();
 
                 log::info!(
                     "submitted bottom up checkpoint({}) in parent at height {}",
                     event.height,
-                    epoch
+                    txn_detail.payload
                 );
             }
         }
 
         Ok(())
+    }
+}
+
+/// Call the function f if amount can be parsed to f64
+fn process_if_f64<F: FnOnce(f64)>(amount: &TokenAmount, f: F) {
+    if let Some(amt) = amount.atto().to_f64() {
+        f(amt)
+    }
+}
+
+/// Call the function f if amount is not optional and can be parsed to f64
+fn process_some_if_f64<F: FnOnce(f64)>(amount: &Option<TokenAmount>, f: F) {
+    if let Some(amt) = amount.as_ref() {
+        process_if_f64(amt, f);
     }
 }

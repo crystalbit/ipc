@@ -45,6 +45,9 @@ ipc-wallet = { workspace = true, features = ["with-ethers"] }
 ipc-api = { workspace = true }
 ipc_actors_abis = { workspace = true }
 
+prometheus = { workspace = true }
+lazy_static = { workspace = true }
+
 [dev-dependencies]
 tempfile = { workspace = true }
 hex = { workspace = true }

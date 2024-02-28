@@ -9,10 +9,12 @@ use clap::Args;
 use fvm_shared::address::Address;
 use fvm_shared::clock::ChainEpoch;
 use ipc_api::subnet_id::SubnetID;
+use ipc_provider::checkpoint::monitor::setup;
 use ipc_provider::checkpoint::BottomUpCheckpointManager;
 use ipc_provider::config::Config;
 use ipc_provider::new_evm_keystore_from_config;
 use ipc_wallet::EvmKeyStore;
+use std::collections::HashMap;
 use std::str::FromStr;
 use std::sync::{Arc, RwLock};
 use std::time::Duration;
@@ -67,7 +69,15 @@ impl CommandLineHandler for BottomUpRelayer {
                 .checkpoint_interval_sec
                 .unwrap_or(DEFAULT_POLLING_INTERVAL),
         );
-        manager.run(submitter, interval).await;
+
+        let prefix = String::from("ipc-relayer");
+        let mut labels = HashMap::new();
+        labels.insert(String::from("subnet_id"), arguments.subnet.clone());
+        labels.insert(String::from("validator"), submitter.to_string());
+
+        setup(prefix, labels)?;
+
+        manager.run(submitter, interval).await?;
 
         Ok(())
     }
